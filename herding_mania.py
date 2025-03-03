@@ -1,15 +1,15 @@
 """
 herding_mania.py
 
-A Price Compression / Herding Strategy for Binance Spot:
-- Detect "mania" or "price compression" based on short MA vs. long MA, RSI, or volume surges.
-- Optionally ride the mania if it is still strong.
-- Attempt to short or exit if mania shows signs of exhaustion ("blow-off top").
+A Price Compression / Herding Strategy that checks ALL USDT pairs on Binance Spot:
+1) Finds symbols where short MA is significantly above long MA (indicating mania).
+2) Also checks RSI overbought levels.
+3) Ranks "manic" symbols by how extreme the mania is.
+4) Buys/Shorts top mania symbols; optionally sells others.
 
-IMPORTANT: 
-1) For real short-selling, use Margin or Futures API calls.
-2) This code is just a demonstration, not guaranteed to be profitable.
-3) Always handle risk properly and test with small amounts or testnet first.
+Caution:
+- "Short" on Spot is just a SELL call unless you have margin/futures.
+- This is a naive example. Real usage needs robust error handling, position management, etc.
 """
 
 import time
@@ -24,207 +24,298 @@ API_SECRET = "YOUR_BINANCE_API_SECRET"
 
 client = Client(API_KEY, API_SECRET)
 
-SYMBOL = "ETHUSDT"             # The pair to trade
+# Strategy parameters
 INTERVAL = Client.KLINE_INTERVAL_15MINUTE
-SHORT_WINDOW = 5               # For mania detection
-LONG_WINDOW = 25
-MANIA_FACTOR = 1.20            # e.g. short MA must be 20% above long MA
-RSI_OVERBOUGHT = 75            # RSI threshold for mania
-TRADE_QUANTITY = 0.01          # e.g. 0.01 ETH
-POLLING_DELAY = 60             # seconds between checks
+SHORT_WINDOW = 5
+LONG_WINDOW  = 25
+MANIA_FACTOR = 1.20         # e.g., short MA must be 20% above long MA
+RSI_OVERBOUGHT = 75         # RSI threshold for mania
+MIN_VOLUME     = 200_000    # min quote volume to consider
+TRADE_QUANTITY_USD = 100    # how many USDT to allocate per mania symbol
+TOP_N          = 3          # how many mania symbols to trade at once
+SLEEP_TIME     = 300        # seconds between full scans (e.g. 5 min)
 
-def get_klines(symbol=SYMBOL, interval=INTERVAL, limit=100):
-    """
-    Fetch kline (OHLCV) data from Binance and return as a DataFrame.
-    """
-    raw_klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-    df = pd.DataFrame(raw_klines, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_volume", "trades",
-        "taker_base_vol", "taker_quote_vol", "ignore"
-    ])
-    # Convert columns to numeric
-    numeric_cols = ["open", "high", "low", "close", "volume", "quote_volume"]
+STABLE_BASES = {"USDC","BUSD","TUSD","DAI","PAX","USDP","EUR","GBP","AUD","UST",
+                "FDUSD","EURI","AEUR"}  # adjust as needed
+
+# (Optional) exit logic: simple TP/SL for demonstration
+TAKE_PROFIT_PCT = 0.10  # e.g., +10%
+STOP_LOSS_PCT   = 0.05  # e.g., -5%
+
+
+# ------------------------------------------------------
+# 1) Fetch All Tickers
+# ------------------------------------------------------
+def get_all_tickers_info():
+    """Return a DataFrame of 24h stats for all Binance symbols."""
+    tickers_24h = client.get_ticker()
+    df = pd.DataFrame(tickers_24h)
+    
+    # Convert numeric columns
+    numeric_cols = ["volume", "quoteVolume", "priceChangePercent", 
+                    "lastPrice", "highPrice", "lowPrice"]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    
-    # Convert times
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms")
     return df
 
-def calculate_indicators(df, short_window=SHORT_WINDOW, long_window=LONG_WINDOW, rsi_period=14):
-    """
-    Adds short MA, long MA, and RSI to the DataFrame.
-    - short MA: rolling mean of close over 'short_window'
-    - long MA : rolling mean of close over 'long_window'
-    - RSI: standard 14-day formula
-    """
-    df = df.copy()
-    df["MA_short"] = df["close"].rolling(short_window).mean()
-    df["MA_long"] = df["close"].rolling(long_window).mean()
 
-    # Compute RSI
+# ------------------------------------------------------
+# 2) Filter & Select Candidate Symbols
+# ------------------------------------------------------
+def filter_usdt_pairs(df, quote_symbol="USDT", min_quote_vol=MIN_VOLUME):
+    """
+    Filter for:
+      - symbols ending with quote_symbol
+      - exclude stablecoins
+      - min volume
+    Returns a list of symbol names.
+    """
+    df = df[df["symbol"].str.endswith(quote_symbol)]
+    df = df[df["quoteVolume"] > min_quote_vol]
+
+    # exclude stablecoin bases
+    df["base_asset"] = df["symbol"].str[:-len(quote_symbol)]
+    df = df[~df["base_asset"].isin(STABLE_BASES)]
+    
+    return df["symbol"].unique().tolist()
+
+
+# ------------------------------------------------------
+# 3) Fetch Klines & Compute Mania Indicators
+# ------------------------------------------------------
+def get_klines_df(symbol, interval=INTERVAL, limit=50):
+    """Fetch klines for a given symbol and return a DataFrame with numeric columns."""
+    try:
+        raw = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        if not raw:
+            return pd.DataFrame()
+        df = pd.DataFrame(raw, columns=[
+            "open_time","open","high","low","close","volume",
+            "close_time","quote_volume","trades",
+            "taker_base_vol","taker_quote_vol","ignore"
+        ])
+        for col in ["open","high","low","close","volume","quote_volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+    except:
+        return pd.DataFrame()  # in case of error
+
+
+def calculate_mania_indicators(df, short_win=SHORT_WINDOW, long_win=LONG_WINDOW, rsi_period=14):
+    """
+    Return a dict with mania-related metrics:
+      - ma_short, ma_long, mania_ratio (ma_short / (ma_long * MANIA_FACTOR))
+      - rsi
+      - last_close
+    Return None if df is too small or can't compute.
+    """
+    if len(df) < max(short_win, long_win, rsi_period):
+        return None
+    
+    # sort by time (in case)
+    df = df.sort_values(by="open_time")
+    df["ma_short"] = df["close"].rolling(short_win).mean()
+    df["ma_long"]  = df["close"].rolling(long_win).mean()
+    
+    # RSI
     df["change"] = df["close"].diff()
-    df["gain"] = np.where(df["change"] > 0, df["change"], 0)
-    df["loss"] = np.where(df["change"] < 0, -df["change"], 0)
+    df["gain"]   = np.where(df["change"]>0, df["change"], 0)
+    df["loss"]   = np.where(df["change"]<0, -df["change"],0)
     df["avg_gain"] = df["gain"].rolling(rsi_period).mean()
     df["avg_loss"] = df["loss"].rolling(rsi_period).mean()
-    df["rs"] = df["avg_gain"] / (df["avg_loss"] + 1e-9)  # avoid div by zero
-    df["RSI"] = 100 - (100 / (1 + df["rs"]))
-
-    return df
-
-def detect_herding_signal(df, mania_factor=MANIA_FACTOR, rsi_overbought=RSI_OVERBOUGHT):
-    """
-    Detect mania and potential short/exit signal based on:
-    1) short MA far above long MA (e.g., > mania_factor * long MA)
-    2) RSI over a certain threshold (like 75/80)
-    3) Optional volume check or price stalling
-
-    Returns:
-      - "LONG"  if mania is forming, we might ride it (short MA crossing above long MA).
-      - "SHORT" if mania is overdone and stalling => short or exit.
-      - None    if no trade signal.
-    """
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]  # previous row
-
-    ma_short = latest["MA_short"]
-    ma_long = latest["MA_long"]
-    rsi_val = latest["RSI"]
-    close_price = latest["close"]
+    df["rs"] = df["avg_gain"] / (df["avg_loss"] + 1e-9)
+    df["rsi"] = 100 - (100/(1+df["rs"]))
     
-    # 1) Check mania condition: short MA is mania_factor above long MA
-    if ma_long > 0 and (ma_short > ma_long * mania_factor):
-        # 2) Also check RSI
-        if rsi_val >= rsi_overbought:
-            # If we see price stalling or reversing below short MA => short
-            # e.g. if close_price < ma_short, let's call it a "SHORT" signal
-            if close_price < ma_short:
-                return "SHORT"
-        else:
-            # mania might still be forming => "LONG" if we just crossed above
-            if (prev["MA_short"] < prev["MA_long"] * mania_factor) and (ma_short > ma_long * mania_factor):
-                return "LONG"
+    latest = df.iloc[-1]
+    ma_s = latest["ma_short"]
+    ma_l = latest["ma_long"]
+    rsi_val = latest["rsi"]
+    last_close = latest["close"]
+    
+    if (ma_l is None) or (ma_l <= 0):
+        mania_ratio = 0
+    else:
+        mania_ratio = ma_s / (ma_l * MANIA_FACTOR)  # how far above mania threshold we are
+    
+    return {
+        "ma_short": ma_s,
+        "ma_long": ma_l,
+        "mania_ratio": mania_ratio,   # > 1 means mania threshold exceeded
+        "rsi": rsi_val,
+        "close": last_close
+    }
 
-    return None
 
-def place_market_order(symbol, side, quantity):
+def assess_mania_score(man_dict, mania_factor=MANIA_FACTOR, rsi_over=RSI_OVERBOUGHT):
     """
-    Place a market order (SPOT).
-    For real short selling, you must use MARGIN or FUTURES endpoints.
+    Convert the mania indicators into a single mania 'score'.
+    Example logic:
+      - If mania_ratio > 1 => partial score
+      - If rsi >= rsi_over => partial score
+    Return a numeric mania_score. Higher => more manic.
+    """
+    if man_dict is None:
+        return 0
+    
+    ratio_score = 0
+    rsi_score   = 0
+    
+    # mania_ratio > 1 => the short MA is above mania_factor * long MA
+    if man_dict["mania_ratio"] > 1:
+        ratio_score = man_dict["mania_ratio"] - 1  # how far above 1 we are
+    
+    if man_dict["rsi"] >= rsi_over:
+        rsi_score = (man_dict["rsi"] - rsi_over)/10.0  # small scaling
+    
+    return ratio_score + rsi_score
+
+
+# ------------------------------------------------------
+# 4) Main Bot Logic
+# ------------------------------------------------------
+def herding_mania_bot():
+    """
+    - Every cycle:
+      1) Fetch all ticker info -> filter for USDT pairs, volume, etc.
+      2) For each candidate, fetch klines, compute mania indicators.
+      3) Compute a mania_score.
+      4) Pick top N mania symbols.
+      5) Place trades (LONG if mania forming, SHORT if mania is extremely overbought).
+         (Naive example: if mania_ratio>1 but rsi<overbought => "LONG",
+                         if mania_ratio>1 and rsi>overbought => "SHORT")
+      6) (Optional) manage existing positions, sell those not manic, etc.
+    - Sleep, repeat.
+    """
+    # We'll do a naive approach: every cycle, flatten any existing positions
+    # except the top mania picks. Then buy/short the top picks equally.
+    
+    while True:
+        try:
+            print("[INFO] Fetching all ticker info ...")
+            all_df = get_all_tickers_info()
+            # filter to USDT pairs
+            candidates = filter_usdt_pairs(all_df, "USDT", MIN_VOLUME)
+            
+            mania_rows = []
+            print(f"[INFO] Found {len(candidates)} candidate USDT pairs.")
+            
+            for sym in candidates:
+                kl_df = get_klines_df(sym, INTERVAL, limit=50)
+                man_ind = calculate_mania_indicators(kl_df)
+                mania_score = assess_mania_score(man_ind)
+                
+                if man_ind is not None:
+                    mania_rows.append({
+                        "symbol": sym,
+                        "mania_score": mania_score,
+                        "ma_short": man_ind["ma_short"],
+                        "ma_long":  man_ind["ma_long"],
+                        "rsi":      man_ind["rsi"],
+                        "close":    man_ind["close"]
+                    })
+            
+            # make DataFrame
+            mania_df = pd.DataFrame(mania_rows)
+            mania_df = mania_df.sort_values("mania_score", ascending=False)
+            
+            # pick top N
+            top_df = mania_df.head(TOP_N)
+            print("\n[DEBUG] Top mania symbols:")
+            print(top_df[["symbol","mania_score","ma_short","ma_long","rsi","close"]])
+            
+            top_symbols = top_df["symbol"].tolist()
+            
+            # SELL everything not in top_symbols (or no mania)
+            flatten_others(top_symbols, "USDT")
+            
+            # For each top symbol, decide LONG or SHORT
+            for _, row in top_df.iterrows():
+                sym  = row["symbol"]
+                sc   = row["mania_score"]
+                ma_s = row["ma_short"]
+                ma_l = row["ma_long"]
+                rsi_v= row["rsi"]
+                price= row["close"]
+                
+                # Decide LONG or SHORT:
+                # Example:
+                # if mania_ratio>1 but RSI<overbought => "LONG"
+                # if mania_ratio>1 and RSI>=overbought => "SHORT"
+                # mania_ratio = (ma_s / (ma_l * MANIA_FACTOR))
+                mania_ratio = (ma_s / (ma_l * MANIA_FACTOR)) if (ma_l>0) else 0
+                
+                # Check if we already hold some of this symbol (spot "long" position)
+                # or if we hold a "short" (not trivial in spot). For simplicity, assume we do not hold.
+                if mania_ratio>1:
+                    if rsi_v < RSI_OVERBOUGHT:
+                        # mania forming => LONG
+                        buy_amount = TRADE_QUANTITY_USD / price
+                        buy_amount = round(buy_amount, 6)
+                        print(f"[TRADE] LONG mania: Buying {buy_amount} of {sym} at ~{price}.")
+                        place_spot_order(sym, SIDE_BUY, buy_amount)
+                    else:
+                        # mania Overdone => SHORT (spot = SELL)
+                        # naive approach: we pretend we hold some of it, or we do margin in real usage
+                        sell_amount = TRADE_QUANTITY_USD / price
+                        sell_amount = round(sell_amount, 6)
+                        print(f"[TRADE] SHORT mania: 'Selling' {sell_amount} of {sym} at ~{price}.")
+                        place_spot_order(sym, SIDE_SELL, sell_amount)
+                else:
+                    print(f"[SKIP] {sym} mania_ratio={mania_ratio:.2f} < 1, no mania trade.")
+            
+            print("[INFO] Cycle complete. Sleeping...")
+            time.sleep(SLEEP_TIME)
+        
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            time.sleep(SLEEP_TIME)
+
+
+# ------------------------------------------------------
+# 5) Helpers to Flatten Non-Mania Positions & Place Orders
+# ------------------------------------------------------
+def flatten_others(keep_symbols, quote_symbol="USDT"):
+    """
+    Sell all spot holdings that are NOT in keep_symbols.
     """
     try:
-        qty_str = f"{quantity:.6f}"  # 6 decimal places
+        acct = client.get_account()
+        bals = acct["balances"]
+        for b in bals:
+            asset = b["asset"]
+            free_amt = float(b["free"])
+            if free_amt <= 0 or asset == quote_symbol:
+                continue
+            
+            pair = asset + quote_symbol
+            # if not in keep_symbols => sell
+            if pair not in keep_symbols:
+                qty = round(free_amt, 6)
+                if qty>0:
+                    print(f"[FLATTEN] Selling {qty} of {pair} (not in mania list).")
+                    place_spot_order(pair, SIDE_SELL, qty)
+    except Exception as e:
+        print(f"[FLATTEN ERROR] {e}")
+
+
+def place_spot_order(symbol, side, quantity):
+    """Wrapper for placing a SPOT market order."""
+    try:
+        q_str = f"{quantity:.6f}"
         order = client.create_order(
             symbol=symbol,
             side=side,
             type=ORDER_TYPE_MARKET,
-            quantity=qty_str
+            quantity=q_str
         )
-        print(f"[{side}] Market order placed for {symbol}, qty={qty_str}. Order response:")
-        print(order)
-        return order
+        print(f"[{side}] Placed market order on {symbol}, qty={q_str}.")
+        # optional: store order info, handle partial fills, etc.
     except Exception as e:
-        print(f"Order failed for {symbol} ({side} {quantity}): {e}")
-        return None
-
-def get_current_price(symbol=SYMBOL):
-    """Return the current price from the Binance ticker."""
-    data = client.get_symbol_ticker(symbol=symbol)
-    return float(data["price"])
-
-def herding_mania_bot():
-    """
-    Main loop:
-      1) Fetch data & compute indicators
-      2) Check signal from detect_herding_signal
-      3) Decide whether to go LONG, SHORT or do nothing
-      4) If you have an open position, manage it (TP, SL, or exit logic)
-      
-    NOTE: This is a naive example. In real usage, you'd track your open positions,
-          use a more robust exit strategy, etc.
-    """
-    position_side = None  # "LONG" or "SHORT"
-    entry_price = 0.0
-
-    # (Optional) define some exit rules
-    TAKE_PROFIT_PCT = 0.10  # e.g., +10%
-    STOP_LOSS_PCT   = 0.05  # e.g., -5%
-
-    while True:
-        try:
-            # 1) Fetch data
-            df = get_klines()
-            df = calculate_indicators(df)
-
-            # 2) Check mania signals
-            signal = detect_herding_signal(df)
-            print(f"[INFO] Detected signal: {signal}")
-
-            current_price = get_current_price(SYMBOL)
-
-            if position_side is None:
-                # 3) If no position, see if we want to open one
-                if signal == "LONG":
-                    print("[BOT] Opening LONG position (buy).")
-                    order = place_market_order(SYMBOL, SIDE_BUY, TRADE_QUANTITY)
-                    if order:
-                        position_side = "LONG"
-                        entry_price = current_price
-
-                elif signal == "SHORT":
-                    # For a real short, you need margin or futures
-                    # Here we simulate "SHORT" by just selling if we hold, 
-                    # or ignoring if we have no holdings. 
-                    # Or do margin logic if you want a real short.
-                    print("[BOT] Opening SHORT position (spot SELL).")
-                    order = place_market_order(SYMBOL, SIDE_SELL, TRADE_QUANTITY)
-                    if order:
-                        position_side = "SHORT"
-                        entry_price = current_price
-
-            else:
-                # 4) If in a position, manage it
-                price_move = (current_price - entry_price) / entry_price
-
-                if position_side == "LONG":
-                    # If up more than TP, exit
-                    if price_move >= TAKE_PROFIT_PCT:
-                        print(f"[BOT] LONG TAKE-PROFIT reached: {price_move*100:.2f}%")
-                        place_market_order(SYMBOL, SIDE_SELL, TRADE_QUANTITY)
-                        position_side = None
-                        entry_price = 0.0
-                    # If down more than SL, exit
-                    elif price_move <= -STOP_LOSS_PCT:
-                        print(f"[BOT] LONG STOP-LOSS reached: {price_move*100:.2f}%")
-                        place_market_order(SYMBOL, SIDE_SELL, TRADE_QUANTITY)
-                        position_side = None
-                        entry_price = 0.0
-
-                elif position_side == "SHORT":
-                    # For a real short, PnL is (entry_price - current_price)
-                    # Let's define short_move as:
-                    short_move = (entry_price - current_price) / entry_price
-                    if short_move >= TAKE_PROFIT_PCT:
-                        print(f"[BOT] SHORT TAKE-PROFIT reached: {short_move*100:.2f}%")
-                        # On spot, to exit a short you would 'buy' the asset.
-                        place_market_order(SYMBOL, SIDE_BUY, TRADE_QUANTITY)
-                        position_side = None
-                        entry_price = 0.0
-                    elif short_move <= -STOP_LOSS_PCT:
-                        print(f"[BOT] SHORT STOP-LOSS reached: {short_move*100:.2f}%")
-                        place_market_order(SYMBOL, SIDE_BUY, TRADE_QUANTITY)
-                        position_side = None
-                        entry_price = 0.0
-
-            time.sleep(POLLING_DELAY)
-
-        except Exception as e:
-            print(f"[ERROR] {e}")
-            time.sleep(POLLING_DELAY)
+        print(f"[ORDER ERROR] {symbol} {side} {quantity}: {e}")
 
 
+# ------------------------------------------------------
+# 6) Main Execution
+# ------------------------------------------------------
 if __name__ == "__main__":
     herding_mania_bot()
