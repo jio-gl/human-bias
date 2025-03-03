@@ -19,18 +19,22 @@ from binance.client import Client
 from binance.enums import *
 
 # --------------------- CONFIG ---------------------
-API_KEY = "YOUR_BINANCE_API_KEY"
-API_SECRET = "YOUR_BINANCE_API_SECRET"
+API_KEY = "API_KEY"
+API_SECRET = "API_SECRET"
 
 client = Client(API_KEY, API_SECRET)
 
 # Strategy parameters
+# Top-level config changes
 INTERVAL = Client.KLINE_INTERVAL_15MINUTE
 SHORT_WINDOW = 5
 LONG_WINDOW  = 25
-MANIA_FACTOR = 1.20         # e.g., short MA must be 20% above long MA
-RSI_OVERBOUGHT = 75         # RSI threshold for mania
-MIN_VOLUME     = 200_000    # min quote volume to consider
+
+# Let's define MANIA_FACTOR as 0.95 (or any factor < 1 to make it even easier to exceed)
+MANIA_FACTOR = 0.95
+RSI_OVERBOUGHT = 50  # drastically lowered for demonstration
+
+MIN_VOLUME     = 20_000_000    # min quote volume to consider
 TRADE_QUANTITY_USD = 100    # how many USDT to allocate per mania symbol
 TOP_N          = 3          # how many mania symbols to trade at once
 SLEEP_TIME     = 300        # seconds between full scans (e.g. 5 min)
@@ -104,15 +108,14 @@ def get_klines_df(symbol, interval=INTERVAL, limit=50):
 def calculate_mania_indicators(df, short_win=SHORT_WINDOW, long_win=LONG_WINDOW, rsi_period=14):
     """
     Return a dict with mania-related metrics:
-      - ma_short, ma_long, mania_ratio (ma_short / (ma_long * MANIA_FACTOR))
+      - ma_short, ma_long
+      - mania_ratio: e.g. (ma_s / (ma_l * MANIA_FACTOR)) - 1
       - rsi
       - last_close
-    Return None if df is too small or can't compute.
     """
     if len(df) < max(short_win, long_win, rsi_period):
         return None
     
-    # sort by time (in case)
     df = df.sort_values(by="open_time")
     df["ma_short"] = df["close"].rolling(short_win).mean()
     df["ma_long"]  = df["close"].rolling(long_win).mean()
@@ -132,15 +135,19 @@ def calculate_mania_indicators(df, short_win=SHORT_WINDOW, long_win=LONG_WINDOW,
     rsi_val = latest["rsi"]
     last_close = latest["close"]
     
-    if (ma_l is None) or (ma_l <= 0):
-        mania_ratio = 0
-    else:
-        mania_ratio = ma_s / (ma_l * MANIA_FACTOR)  # how far above mania threshold we are
-    
+    # If we want a "positive" mania factor for almost everything, 
+    # let's define mania_ratio to show small differences as > 0
+    mania_ratio = 0
+    if (ma_l is not None) and (ma_l > 0):
+        # This formula => mania_ratio > 0 if short MA > MANIA_FACTOR * long MA
+        # If MANIA_FACTOR < 1, short MA can be even < long MA and still yield > 0
+        raw_ratio = ma_s / (ma_l * MANIA_FACTOR)
+        mania_ratio = raw_ratio - 1  # shifts it so raw_ratio=1 => mania_ratio=0
+
     return {
         "ma_short": ma_s,
         "ma_long": ma_l,
-        "mania_ratio": mania_ratio,   # > 1 means mania threshold exceeded
+        "mania_ratio": mania_ratio,
         "rsi": rsi_val,
         "close": last_close
     }
@@ -148,27 +155,20 @@ def calculate_mania_indicators(df, short_win=SHORT_WINDOW, long_win=LONG_WINDOW,
 
 def assess_mania_score(man_dict, mania_factor=MANIA_FACTOR, rsi_over=RSI_OVERBOUGHT):
     """
-    Convert the mania indicators into a single mania 'score'.
-    Example logic:
-      - If mania_ratio > 1 => partial score
-      - If rsi >= rsi_over => partial score
-    Return a numeric mania_score. Higher => more manic.
+    Convert mania indicators into a mania 'score'.
+    We'll just do:
+        mania_score = mania_ratio + (some small factor if rsi >= RSI_OVERBOUGHT)
     """
     if man_dict is None:
         return 0
     
-    ratio_score = 0
+    ratio_score = man_dict["mania_ratio"]  # can be negative if ma_s < factor * ma_l
     rsi_score   = 0
-    
-    # mania_ratio > 1 => the short MA is above mania_factor * long MA
-    if man_dict["mania_ratio"] > 1:
-        ratio_score = man_dict["mania_ratio"] - 1  # how far above 1 we are
-    
     if man_dict["rsi"] >= rsi_over:
-        rsi_score = (man_dict["rsi"] - rsi_over)/10.0  # small scaling
+        rsi_score = (man_dict["rsi"] - rsi_over)/10.0
     
-    return ratio_score + rsi_score
-
+    mania_score = ratio_score + rsi_score
+    return mania_score
 
 # ------------------------------------------------------
 # 4) Main Bot Logic
@@ -200,10 +200,14 @@ def herding_mania_bot():
             print(f"[INFO] Found {len(candidates)} candidate USDT pairs.")
             
             for sym in candidates:
+                print(f"[INFO] Fetching klines for {sym} ...")
                 kl_df = get_klines_df(sym, INTERVAL, limit=50)
                 man_ind = calculate_mania_indicators(kl_df)
                 mania_score = assess_mania_score(man_ind)
-                
+                print(f"[INFO] Mania score for {sym}: {mania_score:.6f}")
+                # After computing mania_ratio, RSI, etc.:
+                print(f"[INFO] mania_ratio={man_ind['mania_ratio']:.3f}, rsi={man_ind['rsi']:.2f} for {sym}")
+
                 if man_ind is not None:
                     mania_rows.append({
                         "symbol": sym,
