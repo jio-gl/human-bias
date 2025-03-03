@@ -36,23 +36,26 @@ We explore three primary strategies, each inspired by a **well-known human or be
 
 ## Risk-Bias Strategy (`risk_bias.py`)
 
-A script that **buys small dips** in an uptrend or **shorts small bounces** in a downtrend. It then **exits winners quickly** (risk‑averse in gains) but **holds losing trades longer** (risk‑seeking in losses), thus featuring **asymmetric risk**.
+Many human traders show **risk-aversion on winners** (they close winning trades too soon) and **risk-seeking on losers** (they hold losing trades, hoping for a recovery). This strategy does the **opposite**, aiming to exploit that common bias:
+
+- **Let Winners Run**: Keep a **larger profit target** (or use a trailing stop) so that if the price moves in your favor, you capture more of the uptrend/downswing.  
+- **Cut Losers Quickly**: Use a **tight stop-loss**, so if the market moves against you, you exit fast before big damage occurs.
 
 ### Key Components
 
 1. **Trend Detection**  
-   - Compare short vs. long moving averages (e.g., 5 vs. 15 periods).  
-   - **Uptrend** if short MA > long MA, **Downtrend** otherwise.
+   - Compare short vs. long moving averages (e.g., 5 vs. 15 periods) to decide if it’s an uptrend (go long on dips) or downtrend (go short on bounces).
 
 2. **Pullback / Bounce Entry**  
-   - In an uptrend, wait for a **small dip** from the recent high.  
-   - In a downtrend, wait for a **small bounce** off the recent low.
+   - In an uptrend, wait for a **small dip** from the recent high to *buy*.  
+   - In a downtrend, wait for a **small bounce** from the recent low to *short*.
 
-3. **Asymmetric Exit**  
-   - **Quick Take‑Profit**: If the trade moves slightly in your favor, exit early (reflecting “don’t lose those gains!”).  
-   - **Wider Stop‑Loss**: If it goes against you, hold longer in hopes it recovers (reflecting “it might come back!”).
+3. **Asymmetric Exits (Contrarian to the Majority Bias)**  
+   - **Large Take‑Profit** (e.g., 5–10%) to “let winners run.”  
+   - **Small Stop‑Loss** (e.g., 1–3%) to “cut losers quickly.”
 
-> *Adapt for margin/futures if you want a true short. On spot alone, shorting requires you to already hold the asset or use margin endpoints.*
+> *If you need *actual* short-selling, adapt this to **Margin** or **Futures**. On **Spot**, shorting typically means you already hold that asset or you trade with margin endpoints.*
+
 
 ---
 
