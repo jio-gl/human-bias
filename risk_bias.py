@@ -74,11 +74,13 @@ def generate_signal(df, short_window=SHORT_WINDOW, long_window=LONG_WINDOW, pull
     recent_low  = df["low"].rolling(long_window).min().iloc[-1]
 
     if short_ma > long_ma:
+        print(f"[INFO] Uptrend. Recent high: {recent_high}, recent close: {recent_close}, pullback_pct: {pullback_pct}")
         # Uptrend. Check if we have a small dip from the recent high
         if (recent_high - recent_close) / recent_high >= pullback_pct:
             return "LONG"
 
     elif short_ma < long_ma:
+        print(f"[INFO] Downtrend. Recent low: {recent_low}, recent close: {recent_close}, pullback_pct: {pullback_pct}")
         # Downtrend. Check if we have a small bounce from the recent low
         if (recent_close - recent_low) / recent_low >= pullback_pct:
             return "SHORT"
