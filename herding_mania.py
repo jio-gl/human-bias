@@ -36,7 +36,7 @@ RSI_OVERBOUGHT = 50  # drastically lowered for demonstration
 
 MIN_VOLUME     = 20_000_000    # min quote volume to consider
 TRADE_QUANTITY_USD = 100    # how many USDT to allocate per mania symbol
-TOP_N          = 3          # how many mania symbols to trade at once
+TOP_N          = 10          # how many mania symbols to trade at once
 SLEEP_TIME     = 300        # seconds between full scans (e.g. 5 min)
 
 STABLE_BASES = {"USDC","BUSD","TUSD","DAI","PAX","USDP","EUR","GBP","AUD","UST",
