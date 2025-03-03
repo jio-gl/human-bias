@@ -8,17 +8,18 @@ This repository contains **experimental trading strategies** implemented in Pyth
 
 We explore three primary strategies, each inspired by a **well-known human or behavioral bias**:
 
-1. **Momentum + Pullback (Profit from Quick Profit-Taking)**  
-   - Exploits the tendency of traders to sell winners too quickly and hold losers too long.  
-   - Buys on small dips (in an uptrend) or shorts on small bounces (in a downtrend).  
+1. **Risk‑Bias Strategy (`risk_bias.py`)**  
+   - Formerly described as “Momentum + Pullback (Profit from Quick Profit-Taking).”  
+   - Exploits the tendency of traders to **sell winners too quickly** (risk‑averse in gains) and **hold losing trades** (risk‑seeking in losses).  
+   - Buys on small dips (in an uptrend) or shorts on small bounces (in a downtrend), then applies an **asymmetric exit** (quick take‑profit vs. larger stop‑loss).
 
 2. **Price Compression / Herding Strategy**  
    - Looks for assets whose prices have “compressed” future upside into the present due to crowd mania.  
-   - Short potential “blow-off tops” once the crowd’s expectation seems overstretched, or ride early mania with tight stops.  
+   - Short potential “blow‑off tops” once the crowd’s expectation seems overstretched, or ride early mania with tight stops.  
 
-3. **Beauty Contest Strategy (Keynesian “Second-Level Thinking”)**  
+3. **Beauty Contest Strategy (`beauty.py`)**  
    - Attempts to pick assets **not** based on fundamentals alone, but on what the **crowd** thinks the “prettiest” coins will be.  
-   - Focuses on **momentum + volume** or other popularity indicators (e.g., social media), aiming to catch short-term hype.  
+   - Focuses on **momentum + volume** or other popularity indicators (e.g., social media), aiming to catch short‑term hype.  
 
 ---
 
@@ -35,13 +36,13 @@ We explore three primary strategies, each inspired by a **well-known human or be
 ## 3. Code Structure
 
 - **`get_all_tickers_info()`**  
-  Fetches 24-hour ticker stats (price changes, volumes, etc.) for all symbols on Binance.
+  Fetches 24‑hour ticker stats (price changes, volumes, etc.) for all symbols on Binance.
 - **`compute_beauty_score(df, alpha=0.5)`**  
   Calculates a “beauty_score” for each symbol based on **(alpha × priceChangePercent) + ((1−alpha) × log(volume))**.  
   - By default, it **filters out** symbols with negative returns.  
   - Uses **log(volume)** to keep large numbers on a comparable scale.
 - **`select_top_symbols(df, quote_symbol="USDT", top_n=5, min_volume=100_000)`**  
-  - Filters out stablecoins and low-volume pairs.  
+  - Filters out stablecoins and low‑volume pairs.  
   - Sorts by **beauty_score** in descending order.  
   - Returns the top N symbols. Also prints debug info (the top 30 or 100 for transparency).
 - **`beauty_contest_bot(quote_symbol="USDT", top_n=5, trade_capital_usdt=100)`**  
@@ -57,17 +58,17 @@ We explore three primary strategies, each inspired by a **well-known human or be
 
 ---
 
-## 4. The “Beauty Contest” Strategy
+## 4. The “Beauty Contest” Strategy (`beauty.py`)
 
 John Maynard Keynes likened markets to a **“newspaper beauty contest,”** where success requires guessing **not** what you personally find pretty, but what you believe the **majority** of other participants will find pretty. Translated into modern crypto markets, this means:
 
 - **We aren’t purely picking “fundamentally strong” coins.**  
 - **We’re picking coins that the crowd (i.e., other traders) will likely push higher** in the short term, often due to hype or FOMO.
 
-### Key Components in This Repo’s Example `beauty.py`
+### Key Components
 
 1. **24h Price Change**  
-   - A proxy for short-term momentum or hype.  
+   - A proxy for short‑term momentum or hype.  
    - Coins with higher positive returns often get more attention, attracting even more buyers.
 
 2. **Volume (Log-Scaled)**  
@@ -83,8 +84,6 @@ John Maynard Keynes likened markets to a **“newspaper beauty contest,”** whe
    - We remove symbols whose 24h changes are negative.  
    - Our aim is to only ride momentum in coins that are already trending up.
 
-This yields a dynamic “beauty contest” approach that can quickly rotate into whichever coins appear to be surging. Of course, it can also quickly rotate out if momentum fades.
-
 ---
 
 ## 5. Usage
@@ -99,11 +98,21 @@ This yields a dynamic “beauty contest” approach that can quickly rotate into
    - Adjust parameters (like `top_n`, `trade_capital_usdt`, or `time.sleep(3600)` for different intervals).  
 4. **Run** the bot:
    ```bash
-   beauty.py
+   python beauty.py
    ```
-   By default, it will loop every hour, buying the top picks and selling any non-top holdings.
+   By default, it will loop every hour, buying the top picks and selling any non‑top holdings.
 
-> **Always test with small capital or on a testnet** if you can. Consider building in more robust error-handling or risk management (e.g., stop-losses).
+> **Always test with small capital or on a testnet** if you can. Consider building in more robust error‑handling or risk management (e.g., stop‑losses).
+
+---
+
+## 6. Risk-Bias Strategy (`risk_bias.py`)
+
+A script that **buys small dips** in an uptrend or **shorts small bounces** in a downtrend. It then **exits winners quickly** (risk‑averse in gains) but **holds losing trades longer** (risk‑seeking in losses), thus featuring **asymmetric risk**.  
+- **Entry**: Compare short vs. long moving averages to identify trend; wait for a small pullback or bounce to confirm the entry.  
+- **Exit**: Rapid take‑profit on small gains, but a larger stop‑loss for losers, reflecting the common human bias of **“Let me see if it recovers!”**  
+
+> *Adapt for margin/futures if you want a true short. On spot alone, shorting requires you to already hold the asset or use margin endpoints.*
 
 ---
 
@@ -120,4 +129,3 @@ This yields a dynamic “beauty contest” approach that can quickly rotate into
 - The code in this repository is provided under an [MIT License](https://opensource.org/licenses/MIT).  
 - Contributions and improvements are welcome—feel free to submit pull requests or open issues.
 
----
