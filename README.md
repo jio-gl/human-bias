@@ -9,9 +9,9 @@ This repository contains **experimental trading strategies** implemented in Pyth
 We explore three primary strategies, each inspired by a **well-known human or behavioral bias**:
 
 1. **Risk‑Bias Strategy (`risk_bias.py`)**  
-   - Formerly described as “Momentum + Pullback (Profit from Quick Profit-Taking).”  
-   - Exploits the tendency of traders to **sell winners too quickly** (risk‑averse in gains) and **hold losing trades** (risk‑seeking in losses).  
-   - Buys on small dips (in an uptrend) or shorts on small bounces (in a downtrend), then applies an **asymmetric exit** (quick take‑profit vs. larger stop‑loss).
+   - Formerly described as “Momentum + Pullback.”  
+   - **Contrarian to Typical Human Bias**: Instead of selling winners too soon and holding losing trades, we do the opposite—**we let winners run** (larger take‑profit) and **cut losers quickly** (smaller stop‑loss).  
+   - Buys on small dips in an uptrend or shorts on small bounces in a downtrend, then applies this **asymmetric exit** to exploit the crowd’s usual behavioral mistakes.
 
 2. **Price Compression / Herding Strategy (`herding_mania.py`)**  
    - Identifies assets whose prices have “compressed” future upside into the present (crowd mania).  
